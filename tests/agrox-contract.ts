@@ -92,7 +92,7 @@ describe("agrox-contract", () => {
         systemState: systemStateKeypair.publicKey,
         machine: machineKeypair.publicKey,
         data: dataKeypair.publicKey,
-        uploader: wallet.publicKey,
+        payer: wallet.publicKey,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .signers([dataKeypair])
@@ -130,7 +130,7 @@ describe("agrox-contract", () => {
         systemState: systemStateKeypair.publicKey,
         machine: machineKeypair.publicKey,
         data: dataWithImageKeypair.publicKey,
-        uploader: wallet.publicKey,
+        payer: wallet.publicKey,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .signers([dataWithImageKeypair])

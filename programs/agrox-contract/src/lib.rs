@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, TokenAccount, Token};
 use std::collections::BTreeMap;
 
+
 declare_id!("Go8PqyzmSG4LfAoo1PqGRbgctXynnRYAVa9RQx9aZRHC");
 
 #[program]
@@ -15,6 +16,8 @@ pub mod agrox_contract {
         system_state.total_data_uploads = 0;
         system_state.data_request_count = 0;
         system_state.plant_count = 0;
+        system_state.machines = Vec::new();
+        system_state.plants = Vec::new();
 
         msg!("AgroX system initialized by: {}", system_state.authority);
         Ok(())
@@ -23,7 +26,7 @@ pub mod agrox_contract {
     pub fn register_machine(ctx: Context<RegisterMachine>, machine_id: String) -> Result<()> {
         // Validate machine ID isn't already used
         let machines = &ctx.accounts.system_state.machines;
-        require!(!machines.contains_key(&machine_id), ErrorCode::MachineIdAlreadyExists);
+        require!(!machines.iter().any(|(id, _)| id == &machine_id), ErrorCode::MachineIdAlreadyExists);
 
         // Create and initialize the machine account
         let machine = &mut ctx.accounts.machine;
@@ -43,7 +46,7 @@ pub mod agrox_contract {
 
         // Add machine to system state
         let system_state = &mut ctx.accounts.system_state;
-        system_state.machines.insert(machine_id.clone(), ctx.accounts.machine.key());
+        system_state.machines.push((machine_id.clone(), ctx.accounts.machine.key()));
         system_state.machine_count += 1;
 
         msg!("Machine registered: {}", machine_id);
@@ -64,7 +67,7 @@ pub mod agrox_contract {
 
         // Add plant to system state
         let system_state = &mut ctx.accounts.system_state;
-        system_state.plants.insert(plant_name.clone(), ctx.accounts.plant.key());
+        system_state.plants.push((plant_name.clone(), ctx.accounts.plant.key()));
         system_state.plant_count += 1;
 
         msg!("Plant created: {}", plant_name);
@@ -278,7 +281,7 @@ pub struct UploadData<'info> {
 
     #[account(
         mut,
-        constraint = system_state.plants.values().any(|&pubkey| pubkey == plant.key()) @ ErrorCode::UnregisteredPlant,
+        constraint = system_state.plants.iter().any(|(_, pubkey)| *pubkey == plant.key()) @ ErrorCode::UnregisteredPlant,
     )]
     pub plant: Account<'info, PlantData>,
     
@@ -357,8 +360,8 @@ pub struct SystemState {
     pub total_data_uploads: u64,
     pub data_request_count: u64,
     pub plant_count: u64,
-    pub machines: BTreeMap<String, Pubkey>,
-    pub plants: BTreeMap<String, Pubkey>,
+    pub machines: Vec<(String, Pubkey)>,
+    pub plants: Vec<(String, Pubkey)>,
 }
 
 impl SystemState {
@@ -368,8 +371,8 @@ impl SystemState {
                             8 + // total_data_uploads
                             8 + // data_request_count
                             8 + // plant_count
-                            500 + // machines map (approx space)
-                            500; // plants map (approx space)
+                            500 + // machines vec (approx space)
+                            500; // plants vec (approx space)
 }
 
 #[account]
