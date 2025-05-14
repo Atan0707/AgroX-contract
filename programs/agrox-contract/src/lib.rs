@@ -14,6 +14,7 @@ pub mod agrox_contract {
         system_state.machine_count = 0;
         system_state.total_data_uploads = 0;
         system_state.data_request_count = 0;
+        system_state.plant_count = 0;
 
         msg!("AgroX system initialized by: {}", system_state.authority);
         Ok(())
@@ -35,6 +36,10 @@ pub mod agrox_contract {
         machine.last_data_timestamp = 0;
         machine.last_image_timestamp = 0;
         machine.data_used_count = 0;
+        
+        // Derive and save the auth bump for automatic uploads
+        let (_, auth_bump) = find_machine_auth_pda(ctx.program_id, &machine_id);
+        machine.auth_bump = auth_bump;
 
         // Add machine to system state
         let system_state = &mut ctx.accounts.system_state;
@@ -42,6 +47,27 @@ pub mod agrox_contract {
         system_state.machine_count += 1;
 
         msg!("Machine registered: {}", machine_id);
+        Ok(())
+    }
+
+    pub fn create_plant(ctx: Context<CreatePlant>, plant_name: String) -> Result<()> {
+        // No longer validating if plant name already exists
+
+        // Create and initialize the plant account
+        let plant = &mut ctx.accounts.plant;
+        plant.creator = ctx.accounts.user.key();
+        plant.plant_name = plant_name.clone();
+        plant.data_count = 0;
+        plant.image_count = 0;
+        plant.creation_timestamp = Clock::get()?.unix_timestamp;
+        plant.last_update_timestamp = 0;
+
+        // Add plant to system state
+        let system_state = &mut ctx.accounts.system_state;
+        system_state.plants.insert(plant_name.clone(), ctx.accounts.plant.key());
+        system_state.plant_count += 1;
+
+        msg!("Plant created: {}", plant_name);
         Ok(())
     }
 
@@ -79,28 +105,34 @@ pub mod agrox_contract {
     ) -> Result<()> {
         let machine = &mut ctx.accounts.machine;
         let system_state = &mut ctx.accounts.system_state;
+        let plant = &mut ctx.accounts.plant;
         let clock = Clock::get()?;
         
-        // Only allow uploads if machine is active
-        require!(machine.is_active, ErrorCode::MachineNotActive);
+        // Machine active status is already checked in the account constraints
+        
+        // The PDA validation is automatically handled by the account constraints
         
         // Create and initialize the data account
         let data = &mut ctx.accounts.data;
         data.machine = machine.key();
+        data.plant = plant.key();
         data.timestamp = clock.unix_timestamp;
         data.temperature = temperature;
         data.humidity = humidity;
         data.image_url = image_url.clone();
         data.used_count = 0;
         
-        // Update machine and system state
+        // Update machine, plant and system state
         machine.data_count += 1;
         machine.last_data_timestamp = clock.unix_timestamp;
+        plant.data_count += 1;
+        plant.last_update_timestamp = clock.unix_timestamp;
         system_state.total_data_uploads += 1;
         
         // Check if this upload includes an image
         if image_url.is_some() {
             machine.image_count += 1;
+            plant.image_count += 1;
             machine.last_image_timestamp = clock.unix_timestamp;
             
             // Additional reward for including an image
@@ -110,7 +142,7 @@ pub mod agrox_contract {
         // Base reward for sensor data
         machine.rewards_earned += 1; // 1 token per data upload
         
-        msg!("Data uploaded from machine: {}", machine.machine_id);
+        msg!("Data uploaded from machine: {} for plant: {}", machine.machine_id, plant.plant_name);
         Ok(())
     }
 
@@ -152,6 +184,26 @@ pub mod agrox_contract {
         
         Ok(())
     }
+
+    pub fn generate_machine_auth(
+        ctx: Context<GenerateMachineAuth>,
+        machine_id: String,
+    ) -> Result<()> {
+        // This function simply validates the PDA, which will create the account if it doesn't exist
+        msg!("Generated machine auth for machine ID: {}", machine_id);
+        Ok(())
+    }
+}
+
+// Helper function to find the machine authority PDA
+pub fn find_machine_auth_pda(program_id: &Pubkey, machine_id: &str) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            b"machine-auth",
+            machine_id.as_bytes(),
+        ],
+        program_id,
+    )
 }
 
 #[derive(Accounts)]
@@ -188,6 +240,24 @@ pub struct RegisterMachine<'info> {
 }
 
 #[derive(Accounts)]
+pub struct CreatePlant<'info> {
+    #[account(mut)]
+    pub system_state: Account<'info, SystemState>,
+    
+    #[account(
+        init,
+        payer = user,
+        space = PlantData::SPACE
+    )]
+    pub plant: Account<'info, PlantData>,
+    
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct ControlMachine<'info> {
     #[account(mut)]
     pub machine: Account<'info, Machine>,
@@ -200,18 +270,37 @@ pub struct UploadData<'info> {
     #[account(mut)]
     pub system_state: Account<'info, SystemState>,
     
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = machine.is_active @ ErrorCode::MachineNotActive,
+    )]
     pub machine: Account<'info, Machine>,
+
+    #[account(
+        mut,
+        constraint = system_state.plants.values().any(|&pubkey| pubkey == plant.key()) @ ErrorCode::UnregisteredPlant,
+    )]
+    pub plant: Account<'info, PlantData>,
     
     #[account(
         init,
-        payer = uploader,
+        payer = payer,
         space = IoTData::SPACE
     )]
     pub data: Account<'info, IoTData>,
     
+    #[account(
+        seeds = [
+            b"machine-auth", 
+            machine.machine_id.as_bytes()
+        ],
+        bump = machine.auth_bump,
+    )]
+    /// CHECK: This account is a PDA derived from the machine ID
+    pub auth_pda: UncheckedAccount<'info>,
+    
     #[account(mut)]
-    pub uploader: Signer<'info>,
+    pub payer: Signer<'info>,
     
     pub system_program: Program<'info, System>,
 }
@@ -238,13 +327,38 @@ pub struct ClaimRewards<'info> {
     pub user: Signer<'info>,
 }
 
+#[derive(Accounts)]
+pub struct GenerateMachineAuth<'info> {
+    #[account(mut)]
+    pub machine: Account<'info, Machine>,
+    
+    #[account(
+        constraint = machine.owner == user.key() @ ErrorCode::Unauthorized,
+    )]
+    pub user: Signer<'info>,
+    
+    #[account(
+        seeds = [
+            b"machine-auth", 
+            machine.machine_id.as_bytes()
+        ],
+        bump = machine.auth_bump,
+    )]
+    /// CHECK: This account is a PDA derived from the machine ID
+    pub auth_pda: UncheckedAccount<'info>,
+    
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 pub struct SystemState {
     pub authority: Pubkey,
     pub machine_count: u64,
     pub total_data_uploads: u64,
     pub data_request_count: u64,
+    pub plant_count: u64,
     pub machines: BTreeMap<String, Pubkey>,
+    pub plants: BTreeMap<String, Pubkey>,
 }
 
 impl SystemState {
@@ -253,7 +367,9 @@ impl SystemState {
                             8 + // machine_count
                             8 + // total_data_uploads
                             8 + // data_request_count
-                            500; // machines map (approx space)
+                            8 + // plant_count
+                            500 + // machines map (approx space)
+                            500; // plants map (approx space)
 }
 
 #[account]
@@ -267,6 +383,7 @@ pub struct Machine {
     pub last_data_timestamp: i64,
     pub last_image_timestamp: i64,
     pub data_used_count: u64,
+    pub auth_bump: u8,
 }
 
 impl Machine {
@@ -279,12 +396,34 @@ impl Machine {
                             8 + // rewards_earned
                             8 + // last_data_timestamp
                             8 + // last_image_timestamp
-                            8; // data_used_count
+                            8 + // data_used_count
+                            1; // auth_bump
+}
+
+#[account]
+pub struct PlantData {
+    pub creator: Pubkey,
+    pub plant_name: String,
+    pub data_count: u64,
+    pub image_count: u64,
+    pub creation_timestamp: i64,
+    pub last_update_timestamp: i64,
+}
+
+impl PlantData {
+    pub const SPACE: usize = 8 + // discriminator
+                            32 + // creator
+                            36 + // plant_name (max 32 chars + 4 bytes for length)
+                            8 + // data_count
+                            8 + // image_count
+                            8 + // creation_timestamp
+                            8; // last_update_timestamp
 }
 
 #[account]
 pub struct IoTData {
     pub machine: Pubkey,
+    pub plant: Pubkey,
     pub timestamp: i64,
     pub temperature: f64,
     pub humidity: f64,
@@ -295,6 +434,7 @@ pub struct IoTData {
 impl IoTData {
     pub const SPACE: usize = 8 + // discriminator
                             32 + // machine
+                            32 + // plant
                             8 + // timestamp
                             8 + // temperature
                             8 + // humidity
@@ -312,4 +452,6 @@ pub enum ErrorCode {
     MachineNotActive,
     #[msg("No rewards available to claim")]
     NoRewardsAvailable,
+    #[msg("Unregistered plant")]
+    UnregisteredPlant,
 }
